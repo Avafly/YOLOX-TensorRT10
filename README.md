@@ -7,7 +7,7 @@ This project provides a C++ TensorRT implementation of [YOLOX](https://github.co
 ## Demo
 
 <p align="center">
-  <img src="https://cdn.jsdelivr.net/gh/Avafly/ImageHostingService@master/uPic/YOLOX-TensorRT10-Demo.jpg" width = "450">
+  <img src="https://cdn.jsdelivr.net/gh/Avafly/ImageHostingService@master/uPic/YOLOX-TensorRT10-Demo.jpg" width = "500">
 </p>
 
 
