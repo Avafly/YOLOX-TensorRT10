@@ -185,7 +185,7 @@ std::vector<Object> YOLOXDetector::Detect(const cv::Mat &image) const
         pad_cols / 2, pad_cols - pad_cols / 2,
         cv::BORDER_CONSTANT, cv::Scalar(114.0, 114.0, 114.0)
     );
-    cv::dnn::blobFromImage(letterbox, blob, 1.0f, cv::Size(letterbox.cols, letterbox.rows), cv::Scalar(0, 0, 0), true, false, CV_32F);
+    cv::dnn::blobFromImage(letterbox, blob, 1.0f, cv::Size(letterbox.cols, letterbox.rows), cv::Scalar(0, 0, 0), false, false, CV_32F);
     MakeContinuous(blob);
 
     // --- Inference
