@@ -2,7 +2,6 @@
 #include <cmath>
 #include <cstdio>
 #include <fstream>
-#include <numeric>
 #include <algorithm>
 
 #include "yolox_detector.h"
@@ -97,12 +96,13 @@ YOLOXDetector::YOLOXDetector(const char *model_path, const float conf_thres,
     }
 
     // --- Create resources
-    // create host memory
+    // create pinned host memory
     int max_in_size_byte = 3 * target_size_ * target_size_ * static_cast<int>(sizeof(float));
-    int out0_hw = target_size_ / 8, out1_hw = target_size_ / 16, out2_hw = target_size_ / 32;
+    int out0_hw = target_size_ / strides_[0], out1_hw = target_size_ / strides_[1], out2_hw = target_size_ / strides_[2];
     int max_out_size_byte = (out0_hw * out0_hw + out1_hw * out1_hw + out2_hw * out2_hw) * (num_class_ + 5) * static_cast<int>(sizeof(float));
-    outs_host_ = std::make_unique<unsigned char[]>(max_out_size_byte);
-    // create cuda memory
+    CUDA_CHECK(cudaMallocHost(reinterpret_cast<void **>(&pinned_in_host_), max_in_size_byte));
+    CUDA_CHECK(cudaMallocHost(reinterpret_cast<void **>(&pinned_out_host_), max_out_size_byte));
+    // create device memory
     buffers_.resize(engine_->getNbIOTensors());
     CUDA_CHECK(cudaMalloc(&buffers_[in_tensor_info_.first], max_in_size_byte));
     CUDA_CHECK(cudaMalloc(&buffers_[out_tensor_info_.first], max_out_size_byte));
@@ -117,11 +117,18 @@ YOLOXDetector::YOLOXDetector(const char *model_path, const float conf_thres,
 YOLOXDetector::~YOLOXDetector()
 {
     for (const auto &buffer : buffers_)
+    {
         if (buffer)
             CUDA_CHECK(cudaFree(buffer));
+    }
 
     if (stream_ && *stream_)
         CUDA_CHECK(cudaStreamDestroy(*stream_));
+
+    if (pinned_in_host_)
+        CUDA_CHECK(cudaFreeHost(pinned_in_host_));
+    if (pinned_out_host_)
+        CUDA_CHECK(cudaFreeHost(pinned_out_host_));
 }
 
 YOLOXDetector::YOLOXDetector(YOLOXDetector &&other) noexcept
@@ -137,7 +144,8 @@ YOLOXDetector::YOLOXDetector(YOLOXDetector &&other) noexcept
     , in_tensor_info_(std::move(other.in_tensor_info_))
     , out_tensor_info_(std::move(other.out_tensor_info_))
     , buffers_(std::move(other.buffers_))
-    , outs_host_(std::move(other.outs_host_))
+    , pinned_in_host_(std::exchange(other.pinned_in_host_, {}))
+    , pinned_out_host_(std::exchange(other.pinned_out_host_, {}))
 {
 
 }
@@ -158,7 +166,8 @@ YOLOXDetector & YOLOXDetector::operator = (YOLOXDetector &&other) noexcept
         in_tensor_info_ = std::move(other.in_tensor_info_);
         out_tensor_info_ = std::move(other.out_tensor_info_);
         buffers_ = std::move(other.buffers_);
-        outs_host_ = std::move(other.outs_host_);
+        pinned_in_host_ = std::exchange(other.pinned_in_host_, {});
+        pinned_out_host_ = std::exchange(other.pinned_out_host_, {});
     }
     return *this;
 }
@@ -201,13 +210,15 @@ std::vector<Object> YOLOXDetector::Detect(const cv::Mat &image) const
     const auto out_dims = context_->getTensorShape(out_tensor_info_.second.c_str());
     const size_t in_size_byte = 3 * letterbox.rows * letterbox.cols * static_cast<int>(sizeof(float));
     const size_t out_size_byte = static_cast<int>(sizeof(float)) * out_dims.d[0] * out_dims.d[1] * out_dims.d[2];
+    
+    memcpy(pinned_in_host_, blob.data, in_size_byte);
 
     // execute
-    CUDA_CHECK(cudaMemcpyAsync(buffers_[0], blob.data, in_size_byte, cudaMemcpyHostToDevice, *stream_));
+    CUDA_CHECK(cudaMemcpyAsync(buffers_[0], pinned_in_host_, in_size_byte, cudaMemcpyHostToDevice, *stream_));
 
     context_->enqueueV3(*stream_);
 
-    CUDA_CHECK(cudaMemcpyAsync(outs_host_.get(), buffers_[1], out_size_byte, cudaMemcpyDeviceToHost, *stream_));
+    CUDA_CHECK(cudaMemcpyAsync(pinned_out_host_, buffers_[1], out_size_byte, cudaMemcpyDeviceToHost, *stream_));
     CUDA_CHECK(cudaStreamSynchronize(*stream_));
 
     // --- Postprocessing
@@ -215,7 +226,7 @@ std::vector<Object> YOLOXDetector::Detect(const cv::Mat &image) const
     std::vector<Anchor> anchors;
     GetAnchors(letterbox.rows, letterbox.cols, anchors);
     GenerateProposals(
-        reinterpret_cast<float *>(outs_host_.get()),
+        pinned_out_host_,
         {static_cast<int>(out_dims.d[0]), static_cast<int>(out_dims.d[1]), static_cast<int>(out_dims.d[2])},
         anchors, proposals
     );

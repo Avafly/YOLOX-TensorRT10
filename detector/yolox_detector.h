@@ -65,7 +65,8 @@ private:
     std::pair<int, std::string> in_tensor_info_{};
     std::pair<int, std::string> out_tensor_info_{};
     std::vector<void *> buffers_{};
-    std::unique_ptr<unsigned char[]> outs_host_{};
+    float *pinned_in_host_{};
+    float *pinned_out_host_{};
 
     static inline const std::vector<int> strides_{8, 16, 32};
 
