@@ -251,7 +251,12 @@ std::vector<std::vector<Object>> YOLOXDetector::Detect(const std::vector<cv::Mat
         return {};
 
     const int batch_size = static_cast<int>(images.size());
-    if (batch_size > max_batch_size_)
+    if (batch_size == 0)
+    {
+        std::cerr << "Batch size == 0\n";
+        return {};
+    }
+    else if (batch_size > max_batch_size_)
     {
         std::cerr << "Batch size " << batch_size << " exceeds max batch size "
             << max_batch_size_ << "\n";
