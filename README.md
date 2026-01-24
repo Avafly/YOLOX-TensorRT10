@@ -2,15 +2,11 @@
 
 This project provides a C++ TensorRT implementation of [YOLOX](https://github.com/Megvii-BaseDetection/YOLOX) with dynamic shape support. Although the YOLOX repository already provides a C++ TensorRT 8 [example](https://github.com/Megvii-BaseDetection/YOLOX/blob/main/demo/TensorRT/cpp/yolox.cpp), it only supports fixed-size inputs and has issues like memory leaks. That is why this project was created.
 
-
-
 ## Demo
 
 <p align="center">
   <img src="https://cdn.jsdelivr.net/gh/Avafly/ImageHostingService@master/uPic/YOLOX-TensorRT10-Demo.jpg" width = "500">
 </p>
-
-
 
 ## Export a Dynamic‐Shape ONNX Model
 
@@ -40,10 +36,20 @@ python3 tools/export_onnx.py --dynamic -n yolox_x -c models/yolox_x.pth
 Convert onnx to engine model as follows.
 
 ```bash
-trtexec --onnx=yolox_x.onnx --saveEngine=yolox_x.engine --fp16 --minShapes=images:1x3x32x32 --optShapes=images:1x3x640x640 --maxShapes=images:1x3x1280x1280
+trtexec --onnx=yolox_x.onnx --saveEngine=yolox_x.engine --fp16 --minShapes=images:1x3x32x32 --optShapes=images:1x3x640x640 --maxShapes=images:4x3x1280x1280
 ```
 
+Detect single image
 
+```bash
+Usage: ./detect_single model image [target size] [conf] [nms]
+```
+
+Detect images in a folder
+
+```bash
+Usage: ./detect_batch model folder [target size] [conf] [nms]
+```
 
 ## Dependencies
 
@@ -52,4 +58,3 @@ trtexec --onnx=yolox_x.onnx --saveEngine=yolox_x.engine --fp16 --minShapes=image
 **CUDA:** 12.9
 
 **OpenCV:** 4.12.0
-
