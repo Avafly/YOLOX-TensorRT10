@@ -58,7 +58,7 @@ int main(int argc, char *argv[])
     };
     if (!detector.IsInited())
     {
-        std::cout << "Faield to create detector\n";
+        std::cout << "Failed to create detector\n";
         return -1;
     }
 
@@ -68,7 +68,7 @@ int main(int argc, char *argv[])
     auto objects = detector.Detect(image_host);
 
     // show elapsed time
-    std::printf("Elapsed time: %.1fms\n", (cv::getTickCount() - start_time) / cv::getTickFrequency() * 1000.0);
+    std::printf("Inference time: %.1fms\n", (cv::getTickCount() - start_time) / cv::getTickFrequency() * 1000.0);
 
     // visualize result
     if (Infer::YOLOXDetector::DrawObjects(image_host, objects, labels, true))

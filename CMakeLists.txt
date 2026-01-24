@@ -26,21 +26,32 @@ find_package(Iconv QUIET)
 set(CUDAToolkit_ROOT "/usr/local/cuda-12.9")
 find_package(CUDAToolkit REQUIRED)
 
-# get *.cpp
-set(SOURCES
-    ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp
+# detect_single
+add_executable(detect_single
+    ${CMAKE_CURRENT_SOURCE_DIR}/detect_single.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/detector/yolox_detector.cpp
 )
-
-add_executable(yolox ${SOURCES})
-
-# include dirs
-target_include_directories(yolox PRIVATE
+target_include_directories(detect_single PRIVATE
     ${OpenCV_INCLUDE_DIRS}
     ${CMAKE_CURRENT_SOURCE_DIR}/detector
 )
-# link libs
-target_link_libraries(yolox
+target_link_libraries(detect_single
+    ${OpenCV_LIBS}
+    nvonnxparser
+    nvinfer
+    CUDA::cudart
+)
+
+# detect_batch
+add_executable(detect_batch
+    ${CMAKE_CURRENT_SOURCE_DIR}/detect_batch.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/detector/yolox_detector.cpp
+)
+target_include_directories(detect_batch PRIVATE
+    ${OpenCV_INCLUDE_DIRS}
+    ${CMAKE_CURRENT_SOURCE_DIR}/detector
+)
+target_link_libraries(detect_batch
     ${OpenCV_LIBS}
     nvonnxparser
     nvinfer
