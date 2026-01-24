@@ -2,7 +2,6 @@
 #include <vector>
 #include <string>
 #include <cstdio>
-#include <filesystem>
 
 #include <opencv2/opencv.hpp>
 #include "yolox_detector.h"
@@ -73,7 +72,7 @@ int main(int argc, char *argv[])
 
     // visualize result
     if (Infer::YOLOXDetector::DrawObjects(image_host, objects, labels, true))
-        cv::imwrite(std::filesystem::path(argv[2]).stem().string() + ".png", image_host);
+        cv::imwrite("results.png", image_host);
     else
         std::cout << "Failed to draw objects\n";
 

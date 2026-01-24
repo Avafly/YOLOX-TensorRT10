@@ -27,11 +27,13 @@ namespace Infer
 static Logger logger;
 
 YOLOXDetector::YOLOXDetector(const char *model_path, const float conf_thres,
-    const float nms_thres, const int target_size, const int num_class)
+    const float nms_thres, const int target_size, const int num_class,
+    const int max_batch_size)
     : conf_thres_(conf_thres)
     , nms_thres_(nms_thres)
     , target_size_(target_size)
     , num_class_(num_class)
+    , max_batch_size_(max_batch_size)
 {
     // --- Check settings
     if (target_size_ % strides_.back() != 0 || target_size_ < 32)
@@ -94,12 +96,18 @@ YOLOXDetector::YOLOXDetector(const char *model_path, const float conf_thres,
         else if (io_mode == nvinfer1::TensorIOMode::kOUTPUT)
             out_tensor_info_ = {i, std::string(tensor_name)};
     }
+    // get max batch size
+    int batch_size = engine_->getProfileShape(in_tensor_info_.second.c_str(), 0,
+        nvinfer1::OptProfileSelector::kMAX).d[0];
+    if (max_batch_size_ <= 0)
+        max_batch_size_ = batch_size;
 
     // --- Create resources
     // create pinned host memory
-    int max_in_size_byte = 3 * target_size_ * target_size_ * static_cast<int>(sizeof(float));
+    int max_in_size_byte = 3 * target_size_ * target_size_ * static_cast<int>(sizeof(float)) * max_batch_size_;
     int out0_hw = target_size_ / strides_[0], out1_hw = target_size_ / strides_[1], out2_hw = target_size_ / strides_[2];
-    int max_out_size_byte = (out0_hw * out0_hw + out1_hw * out1_hw + out2_hw * out2_hw) * (num_class_ + 5) * static_cast<int>(sizeof(float));
+    int max_out_size_byte = (out0_hw * out0_hw + out1_hw * out1_hw + out2_hw * out2_hw) * (num_class_ + 5) *
+        static_cast<int>(sizeof(float)) * max_batch_size_;
     CUDA_CHECK(cudaMallocHost(reinterpret_cast<void **>(&pinned_in_host_), max_in_size_byte));
     CUDA_CHECK(cudaMallocHost(reinterpret_cast<void **>(&pinned_out_host_), max_out_size_byte));
     // create device memory
@@ -137,6 +145,7 @@ YOLOXDetector::YOLOXDetector(YOLOXDetector &&other) noexcept
     , nms_thres_(std::exchange(other.nms_thres_, {}))
     , target_size_(std::exchange(other.target_size_, {}))
     , num_class_(std::exchange(other.num_class_, {}))
+    , max_batch_size_(std::exchange(other.max_batch_size_, {}))
     , stream_(std::move(other.stream_))
     , runtime_(std::move(other.runtime_))
     , engine_(std::move(other.engine_))
@@ -159,6 +168,7 @@ YOLOXDetector & YOLOXDetector::operator = (YOLOXDetector &&other) noexcept
         nms_thres_ = std::exchange(other.nms_thres_, {});
         target_size_ = std::exchange(other.target_size_, {});
         num_class_ = std::exchange(other.num_class_, {});
+        max_batch_size_ = std::exchange(other.max_batch_size_, {});
         stream_ = std::move(other.stream_);
         runtime_ = std::move(other.runtime_);
         engine_ = std::move(other.engine_);
@@ -210,7 +220,7 @@ std::vector<Object> YOLOXDetector::Detect(const cv::Mat &image) const
     const auto out_dims = context_->getTensorShape(out_tensor_info_.second.c_str());
     const size_t in_size_byte = 3 * letterbox.rows * letterbox.cols * static_cast<int>(sizeof(float));
     const size_t out_size_byte = static_cast<int>(sizeof(float)) * out_dims.d[0] * out_dims.d[1] * out_dims.d[2];
-    
+
     memcpy(pinned_in_host_, blob.data, in_size_byte);
 
     // execute
@@ -224,15 +234,107 @@ std::vector<Object> YOLOXDetector::Detect(const cv::Mat &image) const
     // --- Postprocessing
     std::vector<Object> proposals, objects;
     std::vector<Anchor> anchors;
+
+    const int num_anchors = out_dims.d[1];
+    const int walk = out_dims.d[2];
+
     GetAnchors(letterbox.rows, letterbox.cols, anchors);
-    GenerateProposals(
-        pinned_out_host_,
-        {static_cast<int>(out_dims.d[0]), static_cast<int>(out_dims.d[1]), static_cast<int>(out_dims.d[2])},
-        anchors, proposals
-    );
+    GenerateProposals(pinned_out_host_, {1, num_anchors, walk}, anchors, proposals);
     NMS(proposals, objects, img_rows, img_cols, pad_rows / 2, pad_cols / 2, scale, scale);
 
     return objects;
+}
+
+std::vector<std::vector<Object>> YOLOXDetector::Detect(const std::vector<cv::Mat> &images) const
+{
+    if (!IsInited())
+        return {};
+
+    const int batch_size = static_cast<int>(images.size());
+    if (batch_size > max_batch_size_)
+    {
+        std::cerr << "Batch size " << batch_size << " exceeds max batch size "
+            << max_batch_size_ << "\n";
+        return {};
+    }
+
+    // --- Preprocessing
+    std::vector<std::pair<int, int>> image_sizes(batch_size);
+    for (int i = 0; i < batch_size; ++i)
+        image_sizes[i] = {images[i].rows, images[i].cols};
+
+    int out_rows, out_cols;
+    std::vector<int> resize_rows_vec, resize_cols_vec;
+    std::vector<int> pad_rows_vec, pad_cols_vec;
+    std::vector<float> scale_vec;
+    GetBatchLetterboxDimensions(
+        image_sizes, out_rows, out_cols,
+        resize_rows_vec, resize_cols_vec,
+        pad_rows_vec, pad_cols_vec, scale_vec
+    );
+
+    const size_t single_blob_size = 3 * out_rows * out_cols * sizeof(float);
+
+    for (int i = 0; i < batch_size; ++i)
+    {
+        cv::Mat resized;
+        cv::resize(images[i], resized, cv::Size(resize_cols_vec[i], resize_rows_vec[i]),
+            0, 0, cv::INTER_AREA);
+
+        cv::Mat letterbox;
+        cv::copyMakeBorder(resized, letterbox,
+            pad_rows_vec[i] / 2, pad_rows_vec[i] - pad_rows_vec[i] / 2,
+            pad_cols_vec[i] / 2, pad_cols_vec[i] - pad_cols_vec[i] / 2,
+            cv::BORDER_CONSTANT, cv::Scalar(114, 114, 114));
+
+        cv::Mat blob;
+        cv::dnn::blobFromImage(letterbox, blob, 1.0f, cv::Size(letterbox.cols, letterbox.rows),
+            cv::Scalar(0, 0, 0), false, false, CV_32F);
+        MakeContinuous(blob);
+        memcpy(pinned_in_host_ + i * 3 * out_rows * out_cols, blob.data, single_blob_size);
+    }
+
+    // --- Inference
+    // set input shape
+    nvinfer1::Dims trt_in_dims{};
+    trt_in_dims.nbDims = 4;
+    trt_in_dims.d[0] = batch_size;
+    trt_in_dims.d[1] = 3;
+    trt_in_dims.d[2] = out_rows;
+    trt_in_dims.d[3] = out_cols;
+    context_->setInputShape(in_tensor_info_.second.c_str(), trt_in_dims);
+    // compute in/out size for dynamic shape input
+    const auto out_dims = context_->getTensorShape(out_tensor_info_.second.c_str());
+    const size_t in_size_byte = batch_size * 3 * out_rows * out_cols * static_cast<int>(sizeof(float));
+    const size_t out_size_byte = static_cast<int>(sizeof(float)) * out_dims.d[0] * out_dims.d[1] * out_dims.d[2];
+
+    // execute
+    CUDA_CHECK(cudaMemcpyAsync(buffers_[0], pinned_in_host_, in_size_byte, cudaMemcpyHostToDevice, *stream_));
+
+    context_->enqueueV3(*stream_);
+
+    CUDA_CHECK(cudaMemcpyAsync(pinned_out_host_, buffers_[1], out_size_byte, cudaMemcpyDeviceToHost, *stream_));
+    CUDA_CHECK(cudaStreamSynchronize(*stream_));
+
+    // --- Postprocessing
+    std::vector<std::vector<Object>> batch_objects(batch_size);
+    std::vector<Anchor> anchors;
+    GetAnchors(out_rows, out_cols, anchors);
+
+    const int num_anchors = out_dims.d[1];
+    const int walk = out_dims.d[2];
+    const size_t single_out_size = num_anchors * walk;
+
+    for (int i = 0; i < batch_size; ++i)
+    {
+        const float *out_ptr = pinned_out_host_ + i * single_out_size;
+        std::vector<Object> proposals;
+        GenerateProposals(out_ptr, {1, num_anchors, walk}, anchors, proposals);
+        NMS(proposals, batch_objects[i], image_sizes[i].first, image_sizes[i].second,
+            pad_rows_vec[i] / 2, pad_cols_vec[i] / 2, scale_vec[i], scale_vec[i]);
+    }
+
+    return batch_objects;
 }
 
 bool YOLOXDetector::DrawObjects(cv::Mat &image, const std::vector<Object> &objects,
@@ -291,6 +393,48 @@ void YOLOXDetector::GetLetterboxDimensions(const int img_rows, const int img_col
     }
 }
 
+void YOLOXDetector::GetBatchLetterboxDimensions(
+    const std::vector<std::pair<int, int>> &image_sizes, int &out_rows, int &out_cols,
+    std::vector<int> &resize_rows_vec, std::vector<int> &resize_cols_vec,
+    std::vector<int> &pad_rows_vec, std::vector<int> &pad_cols_vec, std::vector<float> &scale_vec) const
+{
+    const size_t batch_size = image_sizes.size();
+    resize_rows_vec.resize(batch_size);
+    resize_cols_vec.resize(batch_size);
+    pad_rows_vec.resize(batch_size);
+    pad_cols_vec.resize(batch_size);
+    scale_vec.resize(batch_size);
+
+    int max_resize_rows = 0, max_resize_cols = 0;
+
+    // get max resize size of each image
+    for (size_t i = 0; i < batch_size; ++i)
+    {
+        int img_rows = image_sizes[i].first;
+        int img_cols = image_sizes[i].second;
+
+        float scale = static_cast<float>(target_size_) / std::max(img_rows, img_cols);
+        int resize_rows = static_cast<int>(std::round(img_rows * scale));
+        int resize_cols = static_cast<int>(std::round(img_cols * scale));
+
+        resize_rows_vec[i] = resize_rows;
+        resize_cols_vec[i] = resize_cols;
+        scale_vec[i] = scale;
+
+        max_resize_rows = std::max(max_resize_rows, resize_rows);
+        max_resize_cols = std::max(max_resize_cols, resize_cols);
+    }
+    out_rows = (max_resize_rows + strides_.back() - 1) / strides_.back() * strides_.back();
+    out_cols = (max_resize_cols + strides_.back() - 1) / strides_.back() * strides_.back();
+
+    // get pad size
+    for (size_t i = 0; i < batch_size; ++i)
+    {
+        pad_rows_vec[i] = out_rows - resize_rows_vec[i];
+        pad_cols_vec[i] = out_cols - resize_cols_vec[i];
+    }
+}
+
 void YOLOXDetector::GetAnchors(const int rows, const int cols, std::vector<Anchor> &anchors) const
 {
     for (const auto &stride : strides_)
@@ -318,7 +462,7 @@ void YOLOXDetector::GenerateProposals(const float *blob, const std::vector<int> 
     const int walk = nhwc_shape[2];
     const int num_class = walk - 5;
     for (int i = 0; i < num_anchor; ++i)
-    {   
+    {
         const float *box_ptr = blob + i * walk;
         const float *cls_ptr = box_ptr + 5;
         const float *pred_ptr = std::max_element(cls_ptr, cls_ptr + num_class);
@@ -382,10 +526,10 @@ void YOLOXDetector::NMS(std::vector<Object> &proposals, std::vector<Object> &obj
         x1 = (x1 - dw) / ratio_w;
         y1 = (y1 - dh) / ratio_h;
 
-        x0 = Clamp(x0, 0.0f, static_cast<float>(orig_w));
-        y0 = Clamp(y0, 0.0f, static_cast<float>(orig_h));
-        x1 = Clamp(x1, x0, static_cast<float>(orig_w));
-        y1 = Clamp(y1, y0, static_cast<float>(orig_h));
+        x0 = std::clamp(x0, 0.0f, static_cast<float>(orig_w));
+        y0 = std::clamp(y0, 0.0f, static_cast<float>(orig_h));
+        x1 = std::clamp(x1, x0, static_cast<float>(orig_w));
+        y1 = std::clamp(y1, y0, static_cast<float>(orig_h));
 
         objects[i].rect.x = x0;
         objects[i].rect.y = y0;
