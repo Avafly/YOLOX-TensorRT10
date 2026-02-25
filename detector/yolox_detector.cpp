@@ -6,7 +6,7 @@
 
 #include "yolox_detector.h"
 
-#define CUDA_CHECK(call)                                                      \
+#define CUDA_ASSERT(call)                                                     \
     do                                                                        \
     {                                                                         \
         const cudaError_t error_code = call;                                  \
@@ -18,6 +18,20 @@
             printf("    Error code: %d\n", error_code);                       \
             printf("    Error text: %s\n", cudaGetErrorString(error_code));   \
             exit(1);                                                          \
+        }                                                                     \
+    } while (0)
+
+#define CUDA_CHECK(call)                                                      \
+    do                                                                        \
+    {                                                                         \
+        const cudaError_t error_code = call;                                  \
+        if (error_code != cudaSuccess)                                        \
+        {                                                                     \
+            printf("CUDA_CHECK Error:\n");                                    \
+            printf("    File:       %s\n", __FILE__);                         \
+            printf("    Line:       %d\n", __LINE__);                         \
+            printf("    Error code: %d\n", error_code);                       \
+            printf("    Error text: %s\n", cudaGetErrorString(error_code));   \
         }                                                                     \
     } while (0)
 
@@ -84,7 +98,7 @@ YOLOXDetector::YOLOXDetector(const char *model_path, const float conf_thres,
 
     // create stream
     stream_ = std::make_unique<cudaStream_t>();
-    CUDA_CHECK(cudaStreamCreate(stream_.get()));
+    CUDA_ASSERT(cudaStreamCreate(stream_.get()));
 
     // get model info
     for (int i = 0; i < engine_->getNbIOTensors(); ++i)
@@ -108,12 +122,12 @@ YOLOXDetector::YOLOXDetector(const char *model_path, const float conf_thres,
     int out0_hw = target_size_ / strides_[0], out1_hw = target_size_ / strides_[1], out2_hw = target_size_ / strides_[2];
     int max_out_size_byte = (out0_hw * out0_hw + out1_hw * out1_hw + out2_hw * out2_hw) * (num_class_ + 5) *
         static_cast<int>(sizeof(float)) * max_batch_size_;
-    CUDA_CHECK(cudaMallocHost(reinterpret_cast<void **>(&pinned_in_host_), max_in_size_byte));
-    CUDA_CHECK(cudaMallocHost(reinterpret_cast<void **>(&pinned_out_host_), max_out_size_byte));
+    CUDA_ASSERT(cudaMallocHost(reinterpret_cast<void **>(&pinned_in_host_), max_in_size_byte));
+    CUDA_ASSERT(cudaMallocHost(reinterpret_cast<void **>(&pinned_out_host_), max_out_size_byte));
     // create device memory
     buffers_.resize(engine_->getNbIOTensors());
-    CUDA_CHECK(cudaMalloc(&buffers_[in_tensor_info_.first], max_in_size_byte));
-    CUDA_CHECK(cudaMalloc(&buffers_[out_tensor_info_.first], max_out_size_byte));
+    CUDA_ASSERT(cudaMalloc(&buffers_[in_tensor_info_.first], max_in_size_byte));
+    CUDA_ASSERT(cudaMalloc(&buffers_[out_tensor_info_.first], max_out_size_byte));
 
     // set in/out tensor addresses
     context_->setInputTensorAddress(in_tensor_info_.second.c_str(), buffers_[0]);
@@ -124,19 +138,7 @@ YOLOXDetector::YOLOXDetector(const char *model_path, const float conf_thres,
 
 YOLOXDetector::~YOLOXDetector()
 {
-    for (const auto &buffer : buffers_)
-    {
-        if (buffer)
-            CUDA_CHECK(cudaFree(buffer));
-    }
-
-    if (stream_ && *stream_)
-        CUDA_CHECK(cudaStreamDestroy(*stream_));
-
-    if (pinned_in_host_)
-        CUDA_CHECK(cudaFreeHost(pinned_in_host_));
-    if (pinned_out_host_)
-        CUDA_CHECK(cudaFreeHost(pinned_out_host_));
+    Cleanup();
 }
 
 YOLOXDetector::YOLOXDetector(YOLOXDetector &&other) noexcept
@@ -163,6 +165,8 @@ YOLOXDetector & YOLOXDetector::operator = (YOLOXDetector &&other) noexcept
 {
     if (this != &other)
     {
+        Cleanup();
+
         is_inited_ = std::exchange(other.is_inited_, false);
         conf_thres_ = std::exchange(other.conf_thres_, {});
         nms_thres_ = std::exchange(other.nms_thres_, {});
@@ -224,12 +228,12 @@ std::vector<Object> YOLOXDetector::Detect(const cv::Mat &image) const
     memcpy(pinned_in_host_, blob.data, in_size_byte);
 
     // execute
-    CUDA_CHECK(cudaMemcpyAsync(buffers_[0], pinned_in_host_, in_size_byte, cudaMemcpyHostToDevice, *stream_));
+    CUDA_ASSERT(cudaMemcpyAsync(buffers_[0], pinned_in_host_, in_size_byte, cudaMemcpyHostToDevice, *stream_));
 
     context_->enqueueV3(*stream_);
 
-    CUDA_CHECK(cudaMemcpyAsync(pinned_out_host_, buffers_[1], out_size_byte, cudaMemcpyDeviceToHost, *stream_));
-    CUDA_CHECK(cudaStreamSynchronize(*stream_));
+    CUDA_ASSERT(cudaMemcpyAsync(pinned_out_host_, buffers_[1], out_size_byte, cudaMemcpyDeviceToHost, *stream_));
+    CUDA_ASSERT(cudaStreamSynchronize(*stream_));
 
     // --- Postprocessing
     std::vector<Object> proposals, objects;
@@ -314,12 +318,12 @@ std::vector<std::vector<Object>> YOLOXDetector::Detect(const std::vector<cv::Mat
     const size_t out_size_byte = static_cast<int>(sizeof(float)) * out_dims.d[0] * out_dims.d[1] * out_dims.d[2];
 
     // execute
-    CUDA_CHECK(cudaMemcpyAsync(buffers_[0], pinned_in_host_, in_size_byte, cudaMemcpyHostToDevice, *stream_));
+    CUDA_ASSERT(cudaMemcpyAsync(buffers_[0], pinned_in_host_, in_size_byte, cudaMemcpyHostToDevice, *stream_));
 
     context_->enqueueV3(*stream_);
 
-    CUDA_CHECK(cudaMemcpyAsync(pinned_out_host_, buffers_[1], out_size_byte, cudaMemcpyDeviceToHost, *stream_));
-    CUDA_CHECK(cudaStreamSynchronize(*stream_));
+    CUDA_ASSERT(cudaMemcpyAsync(pinned_out_host_, buffers_[1], out_size_byte, cudaMemcpyDeviceToHost, *stream_));
+    CUDA_ASSERT(cudaStreamSynchronize(*stream_));
 
     // --- Postprocessing
     std::vector<std::vector<Object>> batch_objects(batch_size);
@@ -543,6 +547,22 @@ void YOLOXDetector::NMS(std::vector<Object> &proposals, std::vector<Object> &obj
         objects[i].prob = score;
         objects[i].label = label;
     }
+}
+
+void YOLOXDetector::Cleanup() noexcept
+{
+    for (const auto &buffer : buffers_)
+        CUDA_CHECK(cudaFree(buffer));
+    buffers_.clear();
+
+    CUDA_CHECK(cudaFreeHost(pinned_in_host_));
+    CUDA_CHECK(cudaFreeHost(pinned_out_host_));
+    pinned_in_host_ = nullptr;
+    pinned_out_host_ = nullptr;
+
+    if (stream_ && *stream_)
+        CUDA_CHECK(cudaStreamDestroy(*stream_));
+    stream_.reset();
 }
 
 }   // namespace Infer

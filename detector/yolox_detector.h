@@ -93,6 +93,8 @@ private:
         const int orig_h, const int orig_w,
         const float dh, const float dw,
         const float ratio_h, const float ratio_w) const;
+
+    void Cleanup() noexcept;
 };
 
 }   // namespace Infer
