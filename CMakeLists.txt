@@ -23,7 +23,9 @@ set(OpenCV_DIR "${LIB_ROOT}/opencv/lib/cmake/opencv4")
 find_package(OpenCV REQUIRED)
 find_package(Iconv QUIET)
 # cuda
-set(CUDAToolkit_ROOT "/usr/local/cuda-12.9")
+if(NOT DEFINED CUDAToolkit_ROOT AND EXISTS "/usr/local/cuda")
+    set(CUDAToolkit_ROOT "/usr/local/cuda")
+endif()
 find_package(CUDAToolkit REQUIRED)
 
 # detect_single
@@ -37,7 +39,6 @@ target_include_directories(detect_single PRIVATE
 )
 target_link_libraries(detect_single
     ${OpenCV_LIBS}
-    nvonnxparser
     nvinfer
     CUDA::cudart
 )
@@ -53,7 +54,6 @@ target_include_directories(detect_batch PRIVATE
 )
 target_link_libraries(detect_batch
     ${OpenCV_LIBS}
-    nvonnxparser
     nvinfer
     CUDA::cudart
 )
