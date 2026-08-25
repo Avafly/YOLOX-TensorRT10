@@ -200,7 +200,7 @@ std::vector<Object> YOLOXDetector::Detect(const cv::Mat &image) const
         img_rows, img_cols, true,
         resize_rows, resize_cols, pad_rows, pad_cols, scale
     );
-    cv::Mat letterbox{}, blob{};
+    cv::Mat letterbox{};
     cv::resize(image, letterbox, cv::Size(resize_cols, resize_rows), 0, 0, cv::INTER_AREA);
     cv::copyMakeBorder(
         letterbox, letterbox,
@@ -208,8 +208,14 @@ std::vector<Object> YOLOXDetector::Detect(const cv::Mat &image) const
         pad_cols / 2, pad_cols - pad_cols / 2,
         cv::BORDER_CONSTANT, cv::Scalar(114.0, 114.0, 114.0)
     );
+    const int blob_dims[4]{1, 3, letterbox.rows, letterbox.cols};
+    cv::Mat blob{4, blob_dims, CV_32F, pinned_in_host_};
     cv::dnn::blobFromImage(letterbox, blob, 1.0f, cv::Size(letterbox.cols, letterbox.rows), cv::Scalar(0, 0, 0), false, false, CV_32F);
-    MakeContinuous(blob);
+    if (blob.data != reinterpret_cast<uchar *>(pinned_in_host_))
+    {
+        std::cerr << "blobFromImage reallocated instead of writing into pinned memory\n";
+        return {};
+    }
 
     // --- Inference
     // set input shape
@@ -224,8 +230,6 @@ std::vector<Object> YOLOXDetector::Detect(const cv::Mat &image) const
     const auto out_dims = context_->getTensorShape(out_tensor_info_.second.c_str());
     const size_t in_size_byte = 3 * letterbox.rows * letterbox.cols * static_cast<int>(sizeof(float));
     const size_t out_size_byte = static_cast<int>(sizeof(float)) * out_dims.d[0] * out_dims.d[1] * out_dims.d[2];
-
-    memcpy(pinned_in_host_, blob.data, in_size_byte);
 
     // execute
     CUDA_ASSERT(cudaMemcpyAsync(buffers_[0], pinned_in_host_, in_size_byte, cudaMemcpyHostToDevice, *stream_));
@@ -282,7 +286,7 @@ std::vector<std::vector<Object>> YOLOXDetector::Detect(const std::vector<cv::Mat
         pad_rows_vec, pad_cols_vec, scale_vec
     );
 
-    const size_t single_blob_size = 3 * out_rows * out_cols * sizeof(float);
+    const int blob_dims[4]{1, 3, out_rows, out_cols};
 
     for (int i = 0; i < batch_size; ++i)
     {
@@ -296,11 +300,15 @@ std::vector<std::vector<Object>> YOLOXDetector::Detect(const std::vector<cv::Mat
             pad_cols_vec[i] / 2, pad_cols_vec[i] - pad_cols_vec[i] / 2,
             cv::BORDER_CONSTANT, cv::Scalar(114, 114, 114));
 
-        cv::Mat blob;
+        float *slot = pinned_in_host_ + i * 3 * out_rows * out_cols;
+        cv::Mat blob{4, blob_dims, CV_32F, slot};
         cv::dnn::blobFromImage(letterbox, blob, 1.0f, cv::Size(letterbox.cols, letterbox.rows),
             cv::Scalar(0, 0, 0), false, false, CV_32F);
-        MakeContinuous(blob);
-        memcpy(pinned_in_host_ + i * 3 * out_rows * out_cols, blob.data, single_blob_size);
+        if (blob.data != reinterpret_cast<uchar *>(slot))
+        {
+            std::cerr << "blobFromImage reallocated instead of writing into pinned memory\n";
+            return {};
+        }
     }
 
     // --- Inference

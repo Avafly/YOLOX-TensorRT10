@@ -75,8 +75,6 @@ private:
 
     static inline const std::vector<int> strides_{8, 16, 32};
 
-    inline void MakeContinuous(cv::Mat &mat) const;
-
     void GetLetterboxDimensions(const int img_rows, const int img_cols, const bool is_dynamic,
         int &resize_rows, int &resize_cols, int &pad_rows, int &pad_cols, float &scale) const;
 
