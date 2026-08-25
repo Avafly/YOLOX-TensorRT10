@@ -94,6 +94,11 @@ int main(int argc, char *argv[])
         int64 start_time = cv::getTickCount();
         auto batch_objects = detector.Detect(batch_images);
         total_infer_time += (cv::getTickCount() - start_time) / cv::getTickFrequency() * 1000.0;
+        if (batch_objects.size() != batch_images.size())
+        {
+            std::cerr << "Inference failed for batch at " << i << "\n";
+            continue;
+        }
 
         // draw and save
         for (size_t j = 0; j < batch_images.size(); ++j)
