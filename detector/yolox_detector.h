@@ -67,9 +67,10 @@ private:
     std::unique_ptr<nvinfer1::IRuntime> runtime_{};
     std::unique_ptr<nvinfer1::ICudaEngine> engine_{};
     std::unique_ptr<nvinfer1::IExecutionContext> context_{};
-    std::pair<int, std::string> in_tensor_info_{};
-    std::pair<int, std::string> out_tensor_info_{};
-    std::vector<void *> buffers_{};
+    std::string in_tensor_name_{};
+    std::string out_tensor_name_{};
+    void *in_buffer_{};
+    void *out_buffer_{};
     float *pinned_in_host_{};
     float *pinned_out_host_{};
 

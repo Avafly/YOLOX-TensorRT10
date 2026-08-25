@@ -106,12 +106,12 @@ YOLOXDetector::YOLOXDetector(const char *model_path, const float conf_thres,
         const char *tensor_name = engine_->getIOTensorName(i);
         nvinfer1::TensorIOMode io_mode = engine_->getTensorIOMode(tensor_name);
         if (io_mode == nvinfer1::TensorIOMode::kINPUT)
-            in_tensor_info_ = {i, std::string(tensor_name)};
+            in_tensor_name_ = tensor_name;
         else if (io_mode == nvinfer1::TensorIOMode::kOUTPUT)
-            out_tensor_info_ = {i, std::string(tensor_name)};
+            out_tensor_name_ = tensor_name;
     }
     // get max batch size
-    int batch_size = engine_->getProfileShape(in_tensor_info_.second.c_str(), 0,
+    int batch_size = engine_->getProfileShape(in_tensor_name_.c_str(), 0,
         nvinfer1::OptProfileSelector::kMAX).d[0];
     if (max_batch_size_ <= 0)
         max_batch_size_ = batch_size;
@@ -125,13 +125,12 @@ YOLOXDetector::YOLOXDetector(const char *model_path, const float conf_thres,
     CUDA_ASSERT(cudaMallocHost(reinterpret_cast<void **>(&pinned_in_host_), max_in_size_byte));
     CUDA_ASSERT(cudaMallocHost(reinterpret_cast<void **>(&pinned_out_host_), max_out_size_byte));
     // create device memory
-    buffers_.resize(engine_->getNbIOTensors());
-    CUDA_ASSERT(cudaMalloc(&buffers_[in_tensor_info_.first], max_in_size_byte));
-    CUDA_ASSERT(cudaMalloc(&buffers_[out_tensor_info_.first], max_out_size_byte));
+    CUDA_ASSERT(cudaMalloc(&in_buffer_, max_in_size_byte));
+    CUDA_ASSERT(cudaMalloc(&out_buffer_, max_out_size_byte));
 
     // set in/out tensor addresses
-    if (!context_->setInputTensorAddress(in_tensor_info_.second.c_str(), buffers_[0]) ||
-        !context_->setOutputTensorAddress(out_tensor_info_.second.c_str(), buffers_[1]))
+    if (!context_->setInputTensorAddress(in_tensor_name_.c_str(), in_buffer_) ||
+        !context_->setOutputTensorAddress(out_tensor_name_.c_str(), out_buffer_))
     {
         std::cerr << "Failed to set tensor addresses\n";
         return;
@@ -156,9 +155,10 @@ YOLOXDetector::YOLOXDetector(YOLOXDetector &&other) noexcept
     , runtime_(std::move(other.runtime_))
     , engine_(std::move(other.engine_))
     , context_(std::move(other.context_))
-    , in_tensor_info_(std::move(other.in_tensor_info_))
-    , out_tensor_info_(std::move(other.out_tensor_info_))
-    , buffers_(std::move(other.buffers_))
+    , in_tensor_name_(std::move(other.in_tensor_name_))
+    , out_tensor_name_(std::move(other.out_tensor_name_))
+    , in_buffer_(std::exchange(other.in_buffer_, {}))
+    , out_buffer_(std::exchange(other.out_buffer_, {}))
     , pinned_in_host_(std::exchange(other.pinned_in_host_, {}))
     , pinned_out_host_(std::exchange(other.pinned_out_host_, {}))
 {
@@ -181,9 +181,10 @@ YOLOXDetector & YOLOXDetector::operator = (YOLOXDetector &&other) noexcept
         runtime_ = std::move(other.runtime_);
         engine_ = std::move(other.engine_);
         context_ = std::move(other.context_);
-        in_tensor_info_ = std::move(other.in_tensor_info_);
-        out_tensor_info_ = std::move(other.out_tensor_info_);
-        buffers_ = std::move(other.buffers_);
+        in_tensor_name_ = std::move(other.in_tensor_name_);
+        out_tensor_name_ = std::move(other.out_tensor_name_);
+        in_buffer_ = std::exchange(other.in_buffer_, {});
+        out_buffer_ = std::exchange(other.out_buffer_, {});
         pinned_in_host_ = std::exchange(other.pinned_in_host_, {});
         pinned_out_host_ = std::exchange(other.pinned_out_host_, {});
     }
@@ -229,18 +230,18 @@ std::vector<Object> YOLOXDetector::Detect(const cv::Mat &image) const
     trt_in_dims.d[1] = 3;
     trt_in_dims.d[2] = letterbox.rows;
     trt_in_dims.d[3] = letterbox.cols;
-    if (!context_->setInputShape(in_tensor_info_.second.c_str(), trt_in_dims))
+    if (!context_->setInputShape(in_tensor_name_.c_str(), trt_in_dims))
     {
         std::cerr << "Failed to set input shape\n";
         return {};
     }
     // compute in/out size for dynamic shape input
-    const auto out_dims = context_->getTensorShape(out_tensor_info_.second.c_str());
+    const auto out_dims = context_->getTensorShape(out_tensor_name_.c_str());
     const size_t in_size_byte = 3 * letterbox.rows * letterbox.cols * static_cast<int>(sizeof(float));
     const size_t out_size_byte = static_cast<int>(sizeof(float)) * out_dims.d[0] * out_dims.d[1] * out_dims.d[2];
 
     // execute
-    CUDA_ASSERT(cudaMemcpyAsync(buffers_[0], pinned_in_host_, in_size_byte, cudaMemcpyHostToDevice, *stream_));
+    CUDA_ASSERT(cudaMemcpyAsync(in_buffer_, pinned_in_host_, in_size_byte, cudaMemcpyHostToDevice, *stream_));
 
     if (!context_->enqueueV3(*stream_))
     {
@@ -249,7 +250,7 @@ std::vector<Object> YOLOXDetector::Detect(const cv::Mat &image) const
         return {};
     }
 
-    CUDA_ASSERT(cudaMemcpyAsync(pinned_out_host_, buffers_[1], out_size_byte, cudaMemcpyDeviceToHost, *stream_));
+    CUDA_ASSERT(cudaMemcpyAsync(pinned_out_host_, out_buffer_, out_size_byte, cudaMemcpyDeviceToHost, *stream_));
     CUDA_ASSERT(cudaStreamSynchronize(*stream_));
 
     // --- Postprocessing
@@ -332,18 +333,18 @@ std::vector<std::vector<Object>> YOLOXDetector::Detect(const std::vector<cv::Mat
     trt_in_dims.d[1] = 3;
     trt_in_dims.d[2] = out_rows;
     trt_in_dims.d[3] = out_cols;
-    if (!context_->setInputShape(in_tensor_info_.second.c_str(), trt_in_dims))
+    if (!context_->setInputShape(in_tensor_name_.c_str(), trt_in_dims))
     {
         std::cerr << "Failed to set input shape\n";
         return {};
     }
     // compute in/out size for dynamic shape input
-    const auto out_dims = context_->getTensorShape(out_tensor_info_.second.c_str());
+    const auto out_dims = context_->getTensorShape(out_tensor_name_.c_str());
     const size_t in_size_byte = batch_size * 3 * out_rows * out_cols * static_cast<int>(sizeof(float));
     const size_t out_size_byte = static_cast<int>(sizeof(float)) * out_dims.d[0] * out_dims.d[1] * out_dims.d[2];
 
     // execute
-    CUDA_ASSERT(cudaMemcpyAsync(buffers_[0], pinned_in_host_, in_size_byte, cudaMemcpyHostToDevice, *stream_));
+    CUDA_ASSERT(cudaMemcpyAsync(in_buffer_, pinned_in_host_, in_size_byte, cudaMemcpyHostToDevice, *stream_));
 
     if (!context_->enqueueV3(*stream_))
     {
@@ -352,7 +353,7 @@ std::vector<std::vector<Object>> YOLOXDetector::Detect(const std::vector<cv::Mat
         return {};
     }
 
-    CUDA_ASSERT(cudaMemcpyAsync(pinned_out_host_, buffers_[1], out_size_byte, cudaMemcpyDeviceToHost, *stream_));
+    CUDA_ASSERT(cudaMemcpyAsync(pinned_out_host_, out_buffer_, out_size_byte, cudaMemcpyDeviceToHost, *stream_));
     CUDA_ASSERT(cudaStreamSynchronize(*stream_));
 
     // --- Postprocessing
@@ -581,9 +582,10 @@ void YOLOXDetector::NMS(std::vector<Object> &proposals, std::vector<Object> &obj
 
 void YOLOXDetector::Cleanup() noexcept
 {
-    for (const auto &buffer : buffers_)
-        CUDA_CHECK(cudaFree(buffer));
-    buffers_.clear();
+    CUDA_CHECK(cudaFree(in_buffer_));
+    CUDA_CHECK(cudaFree(out_buffer_));
+    in_buffer_ = nullptr;
+    out_buffer_ = nullptr;
 
     CUDA_CHECK(cudaFreeHost(pinned_in_host_));
     CUDA_CHECK(cudaFreeHost(pinned_out_host_));
